@@ -56,6 +56,7 @@ class SwaggerUIPlugin(BasePlugin):
         ("validatorUrl", config_options.Type(str, default="none")),
         ("extra_css", config_options.Type(list, default=[])),
         ("dark_scheme_name", config_options.Type(str, default="slate")),
+        ("defaultModelsExpandDepth", config_options.Type(int, default=1)),
     )
 
     def on_pre_page(self, page, config, files, **kwargs):
@@ -212,7 +213,7 @@ class SwaggerUIPlugin(BasePlugin):
         js_code.string += """
             let iframe_id_list = []
             var iframes = document.getElementsByClassName("swagger-ui-iframe");
-            for (var i = 0; i < iframes.length; i++) { 
+            for (var i = 0; i < iframes.length; i++) {
                 iframe_id_list.push(iframes[i].getAttribute("id"))
             }
         """
@@ -248,7 +249,7 @@ class SwaggerUIPlugin(BasePlugin):
         if config["theme"].name == "material":
             # synchronized dark mode with mkdocs-material
             js_code.string += f"""
-            const dark_scheme_name = "{self.config['dark_scheme_name']}"
+            const dark_scheme_name = "{self.config["dark_scheme_name"]}"
             """
             js_code.string += """
             window.scheme = document.body.getAttribute("data-md-color-scheme")
