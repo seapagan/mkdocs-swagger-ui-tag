@@ -69,6 +69,7 @@ class SwaggerUIPlugin(BasePlugin):
             "filter_files",
             config_options.ListOfItems(config_options.Type(str), default=[]),
         ),
+        ("defaultModelsExpandDepth", config_options.Type(int, default=1)),
     )
 
     def on_pre_page(self, page, config, files, **kwargs):
@@ -238,7 +239,7 @@ class SwaggerUIPlugin(BasePlugin):
         js_code.string += """
             let iframe_id_list = []
             var iframes = document.getElementsByClassName("swagger-ui-iframe");
-            for (var i = 0; i < iframes.length; i++) { 
+            for (var i = 0; i < iframes.length; i++) {
                 iframe_id_list.push(iframes[i].getAttribute("id"))
             }
             let ticking = false;
@@ -316,7 +317,9 @@ class SwaggerUIPlugin(BasePlugin):
         iframe["style"] = "display:none;"
         iframe["width"] = "100%"
         iframe["class"] = "swagger-ui-iframe"
-        iframe["onload"] = "this.style.display = 'block'; this.style.overflow = 'hidden'; this.style.width = '100%';"
+        iframe["onload"] = (
+            "this.style.display = 'block'; this.style.overflow = 'hidden'; this.style.width = '100%';"
+        )
         swagger_ui_ele.replace_with(iframe)
 
     def process_options(self, config, swagger_ui_ele):
