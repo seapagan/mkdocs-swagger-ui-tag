@@ -3,6 +3,8 @@ import logging
 import os
 import re
 import shutil
+from pathlib import Path
+from unittest.mock import MagicMock
 
 # other 3rd party
 from bs4 import BeautifulSoup
@@ -32,13 +34,13 @@ def setup_clean_mkdocs_folder(
     ├── docs/
     └── mkdocs.yml
     Args:
-        mkdocs_yml_path (Path): Path of mkdocs.yml file to use
-        output_path (Path): Path of folder in which to create mkdocs project
+        mkdocs_yml_path (str): Path of mkdocs.yml file to use
+        output_path (str): Path of folder in which to create mkdocs project
     Returns:
-        testproject_path (Path): Path to test project
+        testproject_path (str): Path to test project
     """
 
-    testproject_path = output_path / "testproject"
+    testproject_path = os.path.join(output_path, "testproject")
 
     # Create empty 'testproject' folder
     if os.path.exists(str(testproject_path)):
@@ -49,9 +51,9 @@ def setup_clean_mkdocs_folder(
         shutil.rmtree(str(testproject_path))
 
     # Copy correct mkdocs.yml file and our test 'docs/'
-    shutil.copytree(docs_path, str(testproject_path / docs_path.split("/")[-1]))
+    shutil.copytree(docs_path, os.path.join(testproject_path, docs_path.split("/")[-1]))
 
-    shutil.copyfile(mkdocs_yml_path, str(testproject_path / "mkdocs.yml"))
+    shutil.copyfile(mkdocs_yml_path, os.path.join(testproject_path, "mkdocs.yml"))
 
     return testproject_path
 
@@ -85,11 +87,11 @@ def validate_build(testproject_path: str, plugin_config: dict = {}):
     Args:
         testproject_path (Path): Path to test project
     """
-    assert os.path.exists(str(testproject_path / "site"))
+    assert os.path.exists(os.path.join(testproject_path, "site"))
 
     # Make sure index file exists
-    index_file = testproject_path / "site/index.html"
-    assert index_file.exists(), "%s does not exist" % index_file
+    index_file = os.path.join(testproject_path, "site/index.html")
+    assert os.path.exists(index_file), "%s does not exist" % index_file
 
 
 def validate_mkdocs_file(
@@ -106,14 +108,14 @@ def validate_mkdocs_file(
         mkdocs_yml_path=mkdocs_yml_file, output_path=temp_path, docs_path=docs_path
     )
     result = build_docs_setup(
-        testproject_path,
+        str(testproject_path),
     )
     assert result.exit_code == 0, "'mkdocs build' command failed"
 
     # validate build with locale retrieved from mkdocs config file
     validate_build(testproject_path)
 
-    return testproject_path
+    return Path(testproject_path)
 
 
 def validate_iframe(html_content, iframe_src_dir):
@@ -156,7 +158,7 @@ def validate_additional_script_code(html_content, exists=True):
 
 def validate_additional_script_code_for_material(html_content, exists=True):
     assert exists == (
-        'window.scheme = document.body.getAttribute("data-md-color-scheme")'
+        'const schemeAttr = document.body.getAttribute("data-md-color-scheme")'
         in html_content
     )
     assert exists == (
@@ -526,7 +528,7 @@ def test_empty(tmp_path):
     file = testproject_path / "site/empty/index.html"
     contents = file.read_text(encoding="utf8")
 
-    validate_additional_script_code(contents, exists=True)
+    validate_additional_script_code(contents, exists=False)
 
 
 def test_error(tmp_path):
@@ -548,3 +550,48 @@ def test_template(tmp_path):
 
     iframe_content_list = validate_iframe(contents, file.parent)
     assert len(iframe_content_list) == 2
+
+
+def test_filter_files(tmp_path):
+    mkdocs_file = "mkdocs-filter-files.yml"
+    testproject_path = validate_mkdocs_file(
+        tmp_path,
+        f"tests/fixtures/{mkdocs_file}",
+    )
+    file = testproject_path / "site/index.html"
+    contents = file.read_text(encoding="utf8")
+    iframe_content_list = validate_iframe(contents, file.parent)
+    assert len(iframe_content_list) == 1
+
+    file = testproject_path / "site/sub_dir/page_in_sub_dir/index.html"
+    contents = file.read_text(encoding="utf8")
+    iframe_content_list = validate_iframe(contents, file.parent)
+    assert len(iframe_content_list) == 1
+
+    file = testproject_path / "site/empty/index.html"
+    contents = file.read_text(encoding="utf8")
+    validate_additional_script_code(contents, exists=False)
+
+    file = testproject_path / "site/multiple/index.html"
+    contents = file.read_text(encoding="utf8")
+    validate_additional_script_code(contents, exists=False)
+
+
+def test_import_error(monkeypatch):
+    # Simulate ImportError for 'get_plugin_logger'
+    with monkeypatch.context() as m:
+        m.setattr(
+            "mkdocs.plugins.get_plugin_logger", MagicMock(side_effect=ImportError)
+        )
+
+        # Reload the module to apply the monkeypatch
+        import importlib
+
+        from mkdocs_swagger_ui_tag import plugin
+
+        importlib.reload(plugin)
+        # Test that the fallback logger is used
+        assert plugin.log.name == f"mkdocs.plugins.{plugin.__name__}"
+
+        # Ensure the logger works without raising errors
+        plugin.log.info("Test message")

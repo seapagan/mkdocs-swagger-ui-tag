@@ -6,13 +6,22 @@ from urllib.parse import unquote as urlunquote
 from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
-from jinja2 import Environment, FileSystemLoader
+from jinja2 import Environment, FileSystemLoader, select_autoescape
 from markdown.util import AMP_SUBSTITUTE
 from mkdocs import utils
 from mkdocs.config import config_options
 from mkdocs.plugins import BasePlugin
 
-log = logging.getLogger(__name__)
+try:
+    # mkdocs logging utility for mkdocs 1.5+
+    # https://www.mkdocs.org/dev-guide/plugins/#logging-in-plugins
+    from mkdocs.plugins import get_plugin_logger
+
+    log = get_plugin_logger(__name__)
+except ImportError:
+    # compat
+    log = logging.getLogger(f"mkdocs.plugins.{__name__}")  # type: ignore
+
 base_path = os.path.dirname(os.path.abspath(__file__))
 
 
@@ -57,6 +66,10 @@ class SwaggerUIPlugin(BasePlugin):
         ("extra_css", config_options.Type(list, default=[])),
         ("dark_scheme_name", config_options.Type(str, default="slate")),
         ("defaultModelsExpandDepth", config_options.Type(int, default=1)),
+        (
+            "filter_files",
+            config_options.ListOfItems(config_options.Type(str), default=[]),
+        ),
     )
 
     def on_pre_page(self, page, config, files, **kwargs):
@@ -103,99 +116,112 @@ class SwaggerUIPlugin(BasePlugin):
         components = (scheme, netloc, path, query, fragment)
         return urlunsplit(components)
 
-    def on_post_page(self, output, page, config, **kwargs):
+    def on_post_page(self, output, /, *, page, config):
         """Replace swagger-ui tag with iframe
         Add javascript code to update iframe height
         Create a html with Swagger UI for iframe
         """
+        # Using file filter for performance
+        # https://github.com/blueswen/mkdocs-swagger-ui-tag/issues/25
+        if filter_list := self.config["filter_files"]:
+            filter_list = [os.path.normpath(f) for f in filter_list]
+            if os.path.normpath(page.file.src_path) not in filter_list:
+                return output
 
         soup = BeautifulSoup(output, "html.parser")
         swagger_ui_list = soup.find_all("swagger-ui")
+
+        # No tags found, we can return earlier
+        if len(swagger_ui_list) == 0:
+            return output
+
+        # Regular processing
         iframe_id_list = []
         grouped_list = []
 
-        if len(swagger_ui_list) > 0:
-            css_dir = utils.get_relative_url(
-                utils.normalize_url("assets/stylesheets/"), page.url
+        log.info(f"Processing file '{page.file.src_uri}'")
+        css_dir = utils.get_relative_url(
+            utils.normalize_url("assets/stylesheets/"), page.url
+        )
+        js_dir = utils.get_relative_url(
+            utils.normalize_url("assets/javascripts/"), page.url
+        )
+        default_oauth2_redirect_file = utils.get_relative_url(
+            utils.normalize_url("assets/swagger-ui/oauth2-redirect.html"), page.url
+        )
+        env = Environment(
+            loader=FileSystemLoader(os.path.join(base_path, "swagger-ui")),
+            autoescape=select_autoescape(["html"]),
+        )
+        template = env.get_template("swagger.html")
+        extra_css_files = list(
+            map(
+                lambda f: utils.get_relative_url(utils.normalize_url(f), page.url),
+                self.config["extra_css"],
             )
-            js_dir = utils.get_relative_url(
-                utils.normalize_url("assets/javascripts/"), page.url
+        )
+
+        page_dir = os.path.dirname(
+            os.path.join(config["site_dir"], urlunquote(page.url))
+        )
+        if not os.path.exists(page_dir):
+            os.makedirs(page_dir)
+
+        def render_template(openapi_spec_url, swagger_ui_ele):
+            cur_options = self.process_options(config, swagger_ui_ele)
+            cur_oath2_prop = self.process_oath2_prop(swagger_ui_ele)
+            oauth2_redirect_url = cur_options.pop("oauth2RedirectUrl", "")
+            if not oauth2_redirect_url:
+                oauth2_redirect_url = default_oauth2_redirect_file
+
+            template_output = template.render(
+                css_dir=css_dir,
+                extra_css_files=extra_css_files,
+                js_dir=js_dir,
+                background=self.config["background"],
+                id="{{ID_PLACEHOLDER}}",  # ID is unknown yet - it's the hash of the content.
+                openapi_spec_url=openapi_spec_url,
+                oauth2_redirect_url=oauth2_redirect_url,
+                validatorUrl=self.config["validatorUrl"],
+                options_str=json.dumps(cur_options, indent=4)[1:-1],
+                oath2_prop_str=json.dumps(cur_oath2_prop),
             )
-            default_oauth2_redirect_file = utils.get_relative_url(
-                utils.normalize_url("assets/swagger-ui/oauth2-redirect.html"), page.url
+            cur_id = hashlib.sha256(template_output.encode()).hexdigest()[:8]
+            iframe_filename = f"swagger-{cur_id}.html"
+            template_output = template_output.replace("{{ID_PLACEHOLDER}}", cur_id)
+            with open(os.path.join(page_dir, iframe_filename), "w") as f:
+                f.write(template_output)
+            self.replace_with_iframe(soup, swagger_ui_ele, cur_id, iframe_filename)
+            return cur_id
+
+        for swagger_ui_ele in swagger_ui_list:
+            if swagger_ui_ele.has_attr("grouped"):
+                grouped_list.append(swagger_ui_ele)
+                continue
+
+            openapi_spec_url = self.path_to_url(
+                page.file, swagger_ui_ele.get("src", "")
             )
-            env = Environment(
-                loader=FileSystemLoader(os.path.join(base_path, "swagger-ui"))
-            )
-            template = env.get_template("swagger.html")
-            extra_css_files = list(
-                map(
-                    lambda f: utils.get_relative_url(utils.normalize_url(f), page.url),
-                    self.config["extra_css"],
-                )
-            )
-
-            page_dir = os.path.dirname(
-                os.path.join(config["site_dir"], urlunquote(page.url))
-            )
-            if not os.path.exists(page_dir):
-                os.makedirs(page_dir)
-
-            def render_template(openapi_spec_url, swagger_ui_ele):
-                cur_options = self.process_options(config, swagger_ui_ele)
-                cur_oath2_prop = self.process_oath2_prop(swagger_ui_ele)
-                oauth2_redirect_url = cur_options.pop("oauth2RedirectUrl", "")
-                if not oauth2_redirect_url:
-                    oauth2_redirect_url = default_oauth2_redirect_file
-
-                template_output = template.render(
-                    css_dir=css_dir,
-                    extra_css_files=extra_css_files,
-                    js_dir=js_dir,
-                    background=self.config["background"],
-                    id="{{ID_PLACEHOLDER}}",  # ID is unknown yet - it's the hash of the content.
-                    openapi_spec_url=openapi_spec_url,
-                    oauth2_redirect_url=oauth2_redirect_url,
-                    validatorUrl=self.config["validatorUrl"],
-                    options_str=json.dumps(cur_options, indent=4)[1:-1],
-                    oath2_prop_str=json.dumps(cur_oath2_prop),
-                )
-                cur_id = hashlib.sha256(template_output.encode()).hexdigest()[:8]
-                iframe_filename = f"swagger-{cur_id}.html"
-                template_output = template_output.replace("{{ID_PLACEHOLDER}}", cur_id)
-                with open(os.path.join(page_dir, iframe_filename), "w") as f:
-                    f.write(template_output)
-                self.replace_with_iframe(soup, swagger_ui_ele, cur_id, iframe_filename)
-                return cur_id
-
-            for swagger_ui_ele in swagger_ui_list:
-                if swagger_ui_ele.has_attr("grouped"):
-                    grouped_list.append(swagger_ui_ele)
-                    continue
-
-                openapi_spec_url = self.path_to_url(
-                    page.file, swagger_ui_ele.get("src", "")
-                )
-                iframe_id_list.append(
-                    render_template(
-                        openapi_spec_url=openapi_spec_url, swagger_ui_ele=swagger_ui_ele
-                    )
-                )
-
-            if grouped_list:
-                openapi_spec_url = []
-                for swagger_ui_ele in grouped_list:
-                    cur_url = self.path_to_url(page.file, swagger_ui_ele.get("src", ""))
-                    cur_name = swagger_ui_ele.get("name", swagger_ui_ele.get("src", ""))
-                    openapi_spec_url.append({"url": cur_url, "name": cur_name})
-
-                # only use options from first grouped swagger ui tag
+            iframe_id_list.append(
                 render_template(
-                    openapi_spec_url=openapi_spec_url, swagger_ui_ele=grouped_list[0]
+                    openapi_spec_url=openapi_spec_url, swagger_ui_ele=swagger_ui_ele
                 )
-                # only keep first grouped swagger ui tag
-                for rest_swagger_ui_ele in grouped_list[1:]:
-                    rest_swagger_ui_ele.extract()
+            )
+
+        if grouped_list:
+            openapi_spec_url = []
+            for swagger_ui_ele in grouped_list:
+                cur_url = self.path_to_url(page.file, swagger_ui_ele.get("src", ""))
+                cur_name = swagger_ui_ele.get("name", swagger_ui_ele.get("src", ""))
+                openapi_spec_url.append({"url": cur_url, "name": cur_name})
+
+            # only use options from first grouped swagger ui tag
+            render_template(
+                openapi_spec_url=openapi_spec_url, swagger_ui_ele=grouped_list[0]
+            )
+            # only keep first grouped swagger ui tag
+            for rest_swagger_ui_ele in grouped_list[1:]:
+                rest_swagger_ui_ele.extract()
 
         js_code = soup.new_tag("script")
         # trigger from iframe body ResizeObserver
@@ -216,16 +242,7 @@ class SwaggerUIPlugin(BasePlugin):
             for (var i = 0; i < iframes.length; i++) {
                 iframe_id_list.push(iframes[i].getAttribute("id"))
             }
-        """
-        if len(iframe_id_list) == 0:
-            js_code.string += """
-            let ticking = true;
-            """
-        else:
-            js_code.string += """
             let ticking = false;
-            """
-        js_code.string += """
             document.addEventListener('scroll', function(e) {
                 if (!ticking) {
                     window.requestAnimationFrame(()=> {
@@ -252,7 +269,15 @@ class SwaggerUIPlugin(BasePlugin):
             const dark_scheme_name = "{self.config["dark_scheme_name"]}"
             """
             js_code.string += """
-            window.scheme = document.body.getAttribute("data-md-color-scheme")
+            const schemeAttr = document.body.getAttribute("data-md-color-scheme");
+            const isMediaPrefersScheme = document.body.getAttribute("data-md-color-media") === "(prefers-color-scheme: dark)";
+
+            if (!isMediaPrefersScheme) {
+                window.__init_is_dark_mode = (schemeAttr === dark_scheme_name);
+            } else {
+                const computedScheme = window.getComputedStyle(document.body).getPropertyValue('color-scheme');
+                window.__init_is_dark_mode = computedScheme === "dark";
+            }
             const options = {
                 attributeFilter: ['data-md-color-scheme'],
             };
@@ -289,9 +314,12 @@ class SwaggerUIPlugin(BasePlugin):
         iframe["id"] = cur_id
         iframe["src"] = iframe_filename
         iframe["frameborder"] = "0"
-        iframe["style"] = "overflow:hidden;width:100%;"
+        iframe["style"] = "display:none;"
         iframe["width"] = "100%"
         iframe["class"] = "swagger-ui-iframe"
+        iframe["onload"] = (
+            "this.style.display = 'block'; this.style.overflow = 'hidden'; this.style.width = '100%';"
+        )
         swagger_ui_ele.replace_with(iframe)
 
     def process_options(self, config, swagger_ui_ele):
@@ -369,9 +397,10 @@ class SwaggerUIPlugin(BasePlugin):
                     cur_prop[k] = val
         return cur_prop
 
-    def on_post_build(self, config, **kwargs):
+    def on_post_build(self, *, config):
         """Copy Swagger UI css and js files to assets directory"""
 
+        log.info("Copying swagger ui assets.")
         output_base_path = os.path.join(config["site_dir"], "assets")
         css_path = os.path.join(output_base_path, "stylesheets")
         for file_name in os.listdir(

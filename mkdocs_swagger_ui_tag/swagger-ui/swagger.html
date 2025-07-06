@@ -11,7 +11,7 @@
   {% endfor %}
 </head>
 
-<body style="overflow:hidden;background: {{background}};">
+<body style="overflow:hidden;{% if background %}background: {{ background }};{% endif %}">
   <div id="swagger-ui"></div>
   <script src="{{ js_dir }}swagger-ui-bundle.js" charset="UTF-8"> </script>
   <script src="{{ js_dir }}swagger-ui-standalone-preset.js" charset="UTF-8"> </script>
@@ -40,15 +40,14 @@
         "oauth2RedirectUrl": "{{oauth2_redirect_url}}",
         {% endif %}
         "validatorUrl": "{{validatorUrl}}",
-        {{options_str}}
+        {{options_str | safe}}
       })
 
       {% if oath2_prop_str != "{}" %}
-      window.ui.initOAuth({{oath2_prop_str}})
+      window.ui.initOAuth({{oath2_prop_str | safe}})
       {% endif %}
 
-      const scheme = parent.scheme
-      if (scheme === "slate") {
+      if (parent.__init_is_dark_mode) {
           enable_dark_mode();
       }
     }
